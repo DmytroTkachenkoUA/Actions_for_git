@@ -52,3 +52,18 @@ deploy:
     refs:
       - dev
       - staging
+# ##############################################################################################################################
+# For it's working need to add ENV "update_task_definition_image" type "file" on the Settings->CI/CD->Variables :
+# 
+# "import sys, json, argparse
+# 
+# parser = argparse.ArgumentParser('Replaces image in the task definition')
+# parser.add_argument('image_uri', metavar='I', type=str, nargs='+',
+#                    help='The new image URI')
+# 
+# args = parser.parse_args()
+# 
+# definition = json.load(sys.stdin)['taskDefinition']['containerDefinitions']
+# definition[0]['image'] = args.image_uri[0]
+# print json.dumps(definition)"
+# ##############################################################################################################################
