@@ -1,0 +1,126 @@
+name: Deploy to Amazon ECS
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set environment for branch
+        id: set-env
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            echo "aws-role-arn=arn:aws:iam::1234567890:role/github-actions-staging" >> $GITHUB_OUTPUT
+            echo "container-name=app-staging-api" >> $GITHUB_OUTPUT
+            echo "job-container-name=app-staging-job" >> $GITHUB_OUTPUT
+            echo "service=staging-api-service" >> $GITHUB_OUTPUT
+            echo "cluster=app-staging-api" >> $GITHUB_OUTPUT
+            echo "repository=app-staging" >> $GITHUB_OUTPUT
+            echo "image-tag=staging" >> $GITHUB_OUTPUT
+          fi
+
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "aws-role-arn=arn:aws:iam::1234567890:role/github-actions-prod" >> $GITHUB_OUTPUT
+            echo "container-name=app-prod-api" >> $GITHUB_OUTPUT
+            echo "job-container-name=app-prod-job" >> $GITHUB_OUTPUT
+            echo "service=prod-api-service" >> $GITHUB_OUTPUT
+            echo "cluster=prod-api" >> $GITHUB_OUTPUT
+            echo "repository=app-prod" >> $GITHUB_OUTPUT
+            echo "image-tag=latest" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ steps.set-env.outputs.aws-role-arn }}
+          aws-region: ${{secrets.AWS_REGION}}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ steps.set-env.outputs.repository }}
+          IMAGE_TAG: ${{ steps.set-env.outputs.image-tag }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Deploy API service
+        run: |
+          set -e
+
+          CLUSTER=${{ steps.set-env.outputs.cluster }}
+          SERVICE=${{ steps.set-env.outputs.service }}
+          TASK_FAMILY=${{ steps.set-env.outputs.container-name }}
+          IMAGE=${{ steps.build-image.outputs.image }}
+
+          aws ecs describe-task-definition \
+            --task-definition $TASK_FAMILY \
+            --query taskDefinition > task.json
+
+          jq '
+            del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            )
+            | .containerDefinitions[0].image = "'"$IMAGE"'"
+          ' task.json > new-task.json
+
+          aws ecs register-task-definition \
+            --cli-input-json file://new-task.json
+
+          aws ecs update-service \
+            --cluster $CLUSTER \
+            --service $SERVICE \
+            --task-definition $TASK_FAMILY
+
+      - name: Deploy JOB task
+        run: |
+          set -e
+
+          CLUSTER=${{ steps.set-env.outputs.cluster }}
+          TASK_FAMILY=${{ steps.set-env.outputs.job-container-name }}
+          IMAGE=${{ steps.build-image.outputs.image }}
+
+          aws ecs describe-task-definition \
+            --task-definition $TASK_FAMILY \
+            --query taskDefinition > task-job.json
+
+          jq '
+            del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            )
+            | .containerDefinitions[0].image = "'"$IMAGE"'"
+          ' task-job.json > new-task-job.json
+
+          aws ecs register-task-definition \
+            --cli-input-json file://new-task-job.json
